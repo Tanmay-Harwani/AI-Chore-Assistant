@@ -27,7 +27,6 @@ embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 # Make sure this is the correct start date for Week 1 of your schedule.
 CYCLE_START_DATE = datetime.date(2025, 6, 30)
 
-
 # --- 4. Function to Create the Vector Store (Knowledge Base) ---
 @st.cache_resource
 def get_vectorstore():
@@ -44,7 +43,6 @@ def get_vectorstore():
     except Exception as e:
         st.error(f"Error loading or creating vector store: {e}")
         return None
-
 
 # --- 5. Initialize Vector Store and RAG Chain ---
 vectorstore = get_vectorstore()
@@ -112,21 +110,24 @@ if prompt := st.chat_input("Who cleans the kitchen floor today?"):
     contextual_prompt = time_context + prompt
 
     with st.chat_message("assistant"):
-        # This is the upgraded streaming logic
-        full_response = ""
-
-
+        # --- THIS IS THE CORRECTED LOGIC ---
         def stream_generator():
-            nonlocal full_response
+            # This variable is now local to the generator
+            accumulated_response = ""
             for chunk in rag_chain.stream(
-                    {"input": contextual_prompt, "chat_history": st.session_state.chat_history}
+                {"input": contextual_prompt, "chat_history": st.session_state.chat_history}
             ):
                 if "answer" in chunk:
                     content = chunk["answer"]
-                    full_response += content
-                    yield content
+                    accumulated_response += content
+                    yield content  # Yield content for real-time display
+            
+            # After the loop, return the complete message
+            return accumulated_response
 
+        # Use st.write_stream and assign its return value to full_response
+        full_response = st.write_stream(stream_generator())
+        # --- END OF CORRECTED LOGIC ---
 
-        st.write_stream(stream_generator())
-
+    # Add the complete response to history after the stream is finished
     st.session_state.chat_history.append({"role": "assistant", "content": full_response})
