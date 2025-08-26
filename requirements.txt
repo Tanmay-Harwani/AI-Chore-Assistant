@@ -2,9 +2,9 @@
 streamlit==1.37.0
 
 # LangChain core + community integrations
-langchain==0.2.13
-langchain-community==0.2.13
-langchain-google-genai==2.1.9
+langchain==0.2.16
+langchain-community==0.2.16
+langchain-google-genai==1.0.10
 
 # Embeddings + Vector DB
 sentence-transformers==2.7.0
