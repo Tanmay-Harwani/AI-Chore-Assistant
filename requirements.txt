@@ -1,6 +1,6 @@
-streamlit
-langchain
-langchain_community
-pypdf
-faiss-cpu
-langchain-google-genai
+streamlit==1.37.0
+langchain==0.2.12
+langchain-community==0.2.11
+langchain-google-genai==0.0.12
+sentence-transformers==2.7.0
+faiss-cpu==1.8.0
