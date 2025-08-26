@@ -6,7 +6,6 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
 # PAGE CONFIG
@@ -54,6 +53,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def cosine_similarity(a, b):
+    """Simple cosine similarity implementation"""
+    dot_product = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0
+    return dot_product / (norm_a * norm_b)
+
+
 @st.cache_resource
 def get_llm():
     """Initialize Gemini LLM"""
@@ -84,7 +93,7 @@ def get_llm():
 
 @st.cache_resource
 def build_simple_search():
-    """Build simple search from PDF using scikit-learn"""
+    """Build simple search from PDF using pure NumPy"""
     try:
         with st.spinner("🔍 Building search index..."):
             # Load PDF
@@ -131,10 +140,18 @@ def build_simple_search():
 
 
 def simple_search(search_data, query, k=4):
-    """Simple similarity search using cosine similarity"""
+    """Simple similarity search using pure NumPy cosine similarity"""
     try:
-        query_vector = search_data['embeddings'].embed_query(query)
-        similarities = cosine_similarity([query_vector], search_data['vectors'])[0]
+        query_vector = np.array(search_data['embeddings'].embed_query(query))
+        similarities = []
+
+        # Calculate cosine similarity for each document
+        for doc_vector in search_data['vectors']:
+            sim = cosine_similarity(query_vector, doc_vector)
+            similarities.append(sim)
+
+        # Get top k results
+        similarities = np.array(similarities)
         top_indices = np.argsort(similarities)[-k:][::-1]
 
         results = []
