@@ -2,12 +2,15 @@ import streamlit as st
 import datetime
 import os
 import pickle
+from pathlib import Path
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # --- 1. App Configuration ---
 st.set_page_config(
@@ -51,6 +54,8 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(220, 38, 38, 0.3); }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
     .error-container { background-color: #2d1b1b; border: 1px solid #dc2626; padding: 1rem; border-radius: 10px; margin: 1rem 0; }
+    .building-index { background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%); 
+        padding: 1.5rem; border-radius: 10px; text-align: center; margin: 1rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -63,49 +68,76 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 4. Load Precomputed FAISS Index ---
+# --- 4. Build Vectorstore at Runtime ---
 @st.cache_resource
-def get_vectorstore():
-    """Load vectorstore with fallback options"""
-    try:
-        # Try loading pickle file first
-        if os.path.exists("faiss_index.pkl"):
-            with open("faiss_index.pkl", "rb") as f:
-                vectorstore = pickle.load(f)
-            return vectorstore
-    except Exception as e:
-        pass
+def build_vectorstore_runtime():
+    """Build vectorstore from PDF at runtime (cached)"""
 
-    try:
-        # Try loading from save_local directory
-        if os.path.exists("faiss_db"):
+    # Check if we already have a cached version
+    cache_file = "vectorstore_cache.pkl"
+
+    if Path(cache_file).exists():
+        try:
+            with open(cache_file, "rb") as f:
+                return pickle.load(f)
+        except:
+            pass
+
+    # Build from scratch
+    with st.spinner("Building search index from PDF... This may take a moment on first run."):
+        try:
+            # Load PDF
+            if not Path("chore_schedule.pdf").exists():
+                st.error("chore_schedule.pdf not found!")
+                return None
+
+            loader = PyPDFLoader("chore_schedule.pdf")
+            docs = loader.load()
+
+            if not docs:
+                st.error("Could not load PDF content!")
+                return None
+
+            # Split into optimized chunks
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500,  # Smaller chunks for lighter index
+                chunk_overlap=50,
+                separators=["\nWeek", "\n\n", "\n•", "\n", " "]
+            )
+            splits = text_splitter.split_documents(docs)
+
+            # Create embeddings
             embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': True}
             )
-            vectorstore = FAISS.load_local("faiss_db", embeddings, allow_dangerous_deserialization=True)
-            return vectorstore
-    except Exception as e:
-        pass
 
-    # If both methods fail, show error
-    st.error("❌ Could not load vectorstore. Please run build_index.py first.")
-    return None
+            # Build FAISS index
+            vectorstore = FAISS.from_documents(splits, embeddings)
+
+            # Cache it for next time
+            try:
+                with open(cache_file, "wb") as f:
+                    pickle.dump(vectorstore, f)
+            except:
+                pass  # Cache failed but vectorstore still works
+
+            return vectorstore
+
+        except Exception as e:
+            st.error(f"Failed to build vectorstore: {e}")
+            return None
 
 
 @st.cache_resource
 def get_llm():
     """Initialize LLM with better error handling"""
     try:
-        # Try to get API key from multiple sources
         api_key = None
 
-        # Check environment variable first
         if "GOOGLE_API_KEY" in os.environ:
             api_key = os.environ["GOOGLE_API_KEY"]
-
-        # Check Streamlit secrets
         elif hasattr(st, 'secrets') and "GOOGLE_API_KEY" in st.secrets:
             api_key = st.secrets["GOOGLE_API_KEY"]
             os.environ["GOOGLE_API_KEY"] = api_key
@@ -113,24 +145,36 @@ def get_llm():
         if not api_key:
             raise ValueError("Google API key not found")
 
-        # Initialize LLM
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            temperature=0.2,
-            google_api_key=api_key
-        )
+        llm_configs = [
+            {"model": "gemini-1.5-flash", "temperature": 0.2},
+            {"model": "gemini-1.5-flash", "temperature": 0.2, "convert_system_message_to_human": True},
+            {"model": "gemini-1.5-flash", "temperature": 0.2, "google_api_key": api_key}
+        ]
 
-        return llm
+        for config in llm_configs:
+            try:
+                llm = ChatGoogleGenerativeAI(**config)
+                test_response = llm.invoke("Test")
+                return llm
+            except Exception:
+                continue
+
+        raise Exception("All LLM initialization methods failed")
 
     except Exception as e:
         st.error(f"Error initializing AI model: {e}")
         st.markdown("""
         <div class="error-container">
         <h4>🔑 API Key Setup Required</h4>
-        <p>To use this app, you need a Google API key:</p>
+        <p><strong>For local testing:</strong></p>
         <ol>
-        <li>Get a free API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></li>
-        <li>Add it to your Streamlit secrets or environment variables as <code>GOOGLE_API_KEY</code></li>
+        <li>Set: <code>export GOOGLE_API_KEY="your_key"</code></li>
+        <li>Verify: <code>echo $GOOGLE_API_KEY</code></li>
+        </ol>
+        <p><strong>For Streamlit Cloud:</strong></p>
+        <ol>
+        <li>Add secret: <code>GOOGLE_API_KEY = "your_key"</code></li>
+        <li>Redeploy</li>
         </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -138,7 +182,7 @@ def get_llm():
 
 
 # Load resources
-vectorstore = get_vectorstore()
+vectorstore = build_vectorstore_runtime()
 llm = get_llm()
 
 if not vectorstore or not llm:
@@ -229,7 +273,7 @@ try:
         ("human", "{input}")
     ])
 
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
     history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
@@ -271,14 +315,11 @@ with st.sidebar:
 
     for i, q in enumerate(sample_questions):
         if st.button(q, key=f"sample_{i}", use_container_width=True):
-            # Add the question to chat history
             if "chat_history" not in st.session_state:
                 st.session_state.chat_history = []
 
-            # Add user message
             st.session_state.chat_history.append({"role": "user", "content": q})
 
-            # Generate response immediately
             time_context = create_detailed_context(current_date, current_week, current_day)
             contextual_prompt = f"{time_context}\n\nUSER QUESTION: {q}"
 
@@ -291,7 +332,6 @@ with st.sidebar:
                     if "answer" in chunk:
                         response += chunk["answer"]
 
-                # Add assistant response to chat history
                 st.session_state.chat_history.append({"role": "assistant", "content": response})
 
             except Exception as e:
@@ -308,12 +348,10 @@ with st.sidebar:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# Display chat history
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Handle new messages
 if prompt := st.chat_input("Ask about chores..."):
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
