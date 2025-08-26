@@ -1,15 +1,19 @@
+
 # Core app
-streamlit==1.37.0
+streamlit==1.39.0
 
-# LangChain core + community integrations
-langchain==0.2.16
-langchain-community==0.2.16
-langchain-google-genai==1.0.10
+# LangChain - let pip resolve compatible versions
+langchain==0.3.7
+langchain-community==0.3.7
+langchain-google-genai==2.0.3
+langchain-core>=0.3.17
 
-# Embeddings + Vector DB
-sentence-transformers==2.7.0
+# Vector DB (FAISS for retrieval)
 faiss-cpu==1.8.0
 
-# Required for sentence-transformers
-torch>=2.5.0
-transformers==4.41.2
+# HuggingFace embeddings (lighter version)
+sentence-transformers==3.3.1
+
+# Essential dependencies only
+numpy==1.26.4
+pypdf==5.1.0

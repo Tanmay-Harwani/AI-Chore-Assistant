@@ -1,16 +1,15 @@
 import streamlit as st
 import datetime
 import os
+import pickle
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.embeddings import HuggingFaceEmbeddings  # Using HuggingFace embeddings
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
-# --- 1. App Configuration with Custom Styling ---
+# --- 1. App Configuration ---
 st.set_page_config(
     page_title="AI Chore Assistant",
     page_icon="🏠",
@@ -18,20 +17,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for dark theme with purple accents
+# --- 2. Custom Styling ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
     .stApp { background-color: #0a0a0a; color: #e0e0e0; }
     .main { font-family: 'Inter', sans-serif; background-color: #0a0a0a; }
-    .css-1d391kg, .css-1y4p8pa { background-color: #1a1a1a !important; }
     .sidebar .sidebar-content { background-color: #1a1a1a; }
     .main-header { text-align: center; padding: 2rem 0 1rem 0;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%, #9333ea 100%);
         border-radius: 15px; margin-bottom: 2rem; color: white;
         box-shadow: 0 4px 20px rgba(147, 51, 234, 0.3); }
-    .main-header h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem;
-        text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5); }
+    .main-header h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem; }
     .main-header p { font-size: 1.1rem; opacity: 0.9; font-weight: 400; }
     .date-display { background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4c1d95 100%);
         padding: 1rem; border-radius: 15px; text-align: center; margin-bottom: 1.5rem;
@@ -53,12 +50,11 @@ st.markdown("""
         font-weight: 600; width: 100%; transition: all 0.3s ease;
         box-shadow: 0 2px 8px rgba(220, 38, 38, 0.3); }
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
-    ::-webkit-scrollbar { width: 8px; background-color: #1a1a1a; }
-    ::-webkit-scrollbar-thumb { background: linear-gradient(135deg, #6366f1, #8b5cf6); border-radius: 4px; }
+    .error-container { background-color: #2d1b1b; border: 1px solid #dc2626; padding: 1rem; border-radius: 10px; margin: 1rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. Modern Header ---
+# --- 3. Header ---
 st.markdown("""
 <div class="main-header">
     <h1>🏠 AI Chore Assistant</h1>
@@ -66,29 +62,89 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# --- 3. API Key and LLM Initialization ---
-try:
-    if "GOOGLE_API_KEY" not in os.environ:
-        os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
 
-    # LLM (Gemini)
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        temperature=0.2
-    )
+# --- 4. Load Precomputed FAISS Index ---
+@st.cache_resource
+def get_vectorstore():
+    """Load vectorstore with fallback options"""
+    try:
+        # Try loading pickle file first
+        if os.path.exists("faiss_index.pkl"):
+            with open("faiss_index.pkl", "rb") as f:
+                vectorstore = pickle.load(f)
+            return vectorstore
+    except Exception as e:
+        pass
 
-    # Embeddings (HuggingFace, free, no quota)
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={'device': 'cpu'},
-        encode_kwargs={'normalize_embeddings': True}
-    )
+    try:
+        # Try loading from save_local directory
+        if os.path.exists("faiss_db"):
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            vectorstore = FAISS.load_local("faiss_db", embeddings, allow_dangerous_deserialization=True)
+            return vectorstore
+    except Exception as e:
+        pass
 
-except Exception as e:
-    st.error(f"Error initializing AI models: {e}")
+    # If both methods fail, show error
+    st.error("❌ Could not load vectorstore. Please run build_index.py first.")
+    return None
+
+
+@st.cache_resource
+def get_llm():
+    """Initialize LLM with better error handling"""
+    try:
+        # Try to get API key from multiple sources
+        api_key = None
+
+        # Check environment variable first
+        if "GOOGLE_API_KEY" in os.environ:
+            api_key = os.environ["GOOGLE_API_KEY"]
+
+        # Check Streamlit secrets
+        elif hasattr(st, 'secrets') and "GOOGLE_API_KEY" in st.secrets:
+            api_key = st.secrets["GOOGLE_API_KEY"]
+            os.environ["GOOGLE_API_KEY"] = api_key
+
+        if not api_key:
+            raise ValueError("Google API key not found")
+
+        # Initialize LLM
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash",
+            temperature=0.2,
+            google_api_key=api_key
+        )
+
+        return llm
+
+    except Exception as e:
+        st.error(f"Error initializing AI model: {e}")
+        st.markdown("""
+        <div class="error-container">
+        <h4>🔑 API Key Setup Required</h4>
+        <p>To use this app, you need a Google API key:</p>
+        <ol>
+        <li>Get a free API key from <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a></li>
+        <li>Add it to your Streamlit secrets or environment variables as <code>GOOGLE_API_KEY</code></li>
+        </ol>
+        </div>
+        """, unsafe_allow_html=True)
+        return None
+
+
+# Load resources
+vectorstore = get_vectorstore()
+llm = get_llm()
+
+if not vectorstore or not llm:
     st.stop()
 
-# --- 4. Date Logic ---
+# --- 5. Date Logic ---
 CYCLE_START_DATE = datetime.date(2025, 6, 30)
 
 
@@ -104,163 +160,100 @@ def validate_and_get_week_info(target_date=None):
     return target_date, week_number, day_name, status
 
 
-# --- 5. Vector Store (Silent, no messages) ---
-@st.cache_resource
-def get_vectorstore():
-    try:
-        if not os.path.exists("chore_schedule.pdf"):
-            st.error("chore_schedule.pdf not found!")
-            return None
-        loader = PyPDFLoader("chore_schedule.pdf")
-        docs = loader.load()
-        if not docs:
-            st.error("PDF loaded but no content found!")
-            return None
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=600,
-            chunk_overlap=150,
-            separators=["\n\n", "\n", "Week", "Chore", "•", " ", ""]
-        )
-        splits = text_splitter.split_documents(docs)
-        for i, split in enumerate(splits):
-            split.metadata["chunk_id"] = i
-            split.metadata["char_count"] = len(split.page_content)
-        vectorstore = FAISS.from_documents(documents=splits, embedding=embeddings)
-        return vectorstore
-    except Exception as e:
-        st.error(f"Error loading PDF: {str(e)}")
-        return None
-
-
-# --- 6. Initialize ---
-vectorstore = get_vectorstore()
-if not vectorstore:
-    st.stop()
-
-# --- 7. RAG Setup with Corrected Rotating System ---
+# --- 6. RAG Setup ---
 contextualize_q_system_prompt = (
     "Given a chat history and the latest user question, "
     "reformulate the question to be standalone and clear. "
     "Do NOT answer the question, just reformulate it if needed."
 )
 
-qa_system_prompt = """
-You are a helpful AI assistant for a household chore schedule system.
+qa_system_prompt = """You are a helpful AI assistant for a household chore schedule system.
 
-HOUSEHOLD MEMBERS (in rotation order):
+HOUSEHOLD MEMBERS (rotation order):
 1. Tanmay
 2. Soham  
 3. Pranjul
 4. Ishika
 
-RESPONSE FORMATTING RULES:
+CHORE TYPES:
+Weekly Chores (rotate weekly):
+- Toilet & Sink Cleaning
+- Bathroom Floor & Bathtub Cleaning  
+- Kitchen Foil & Platform Cleaning
+- Kitchen Floor Cleaning
+- Black Trash Can Disposal (Tuesday night)
 
-For "list duties" or "current week" questions, use this TABULAR FORMAT:
+Kitchen Trash (3x per week): Monday, Thursday, Sunday
 
-| **Person** | **Main Chore** | **Kitchen Trash Day** | **Black Trash (Tue)** |
-|------------|----------------|----------------------|----------------------|
-| **Tanmay** | [Main chore for this week] | [Day if assigned] | [✓ if assigned this week] |
-| **Soham** | [Main chore for this week] | [Day if assigned] | [✓ if assigned this week] |
-| **Pranjul** | [Main chore for this week] | [Day if assigned] | [✓ if assigned this week] |
-| **Ishika** | [Main chore for this week] | [Day if assigned] | [✓ if assigned this week] |
+RESPONSE FORMATTING:
+For weekly overview questions, use this format:
 
-IMPORTANT ROTATION RULES:
-- ALL chores rotate weekly in a 4-week cycle, including black trash can duty
-- Black trash can goes out every Tuesday night, but WHO does it rotates weekly
-- Kitchen trash days (Mon/Thu/Sun) also rotate with the weekly assignments
-- NO person has permanent assignment to any chore - everything rotates
+**🏠 This Week's Chore Assignments:**
 
-For single person questions:
-"[Name] is responsible for [specific chore] this week."
+| **Person** | **Weekly Chore** | **Black Trash (Tue)** |
+|------------|------------------|----------------------|
+| Tanmay     | [Chore Name]     | ✓ / -               |
+| Soham      | [Chore Name]     | ✓ / -               |
+| Pranjul    | [Chore Name]     | ✓ / -               |
+| Ishika     | [Chore Name]     | ✓ / -               |
 
-For daily questions:
-"Today, [Name] takes out the [type] trash."
+**🗑️ Kitchen Trash Schedule:**
 
-For black trash questions:
-"[Name] takes out the black trash can this Tuesday night."
+| **Day** | **Person** |
+|---------|------------|
+| Monday  | [Name]     |
+| Thursday| [Name]     |
+| Sunday  | [Name]     |
 
-RESPONSE STYLE:
-- Use markdown tables for multiple assignments
-- Bold person names for clarity  
-- Keep individual responses conversational
-- Never mention "Week 1", "Week 2", etc. - just say "this week"
-- Answer open-ended questions naturally and helpfully
-- Be conversational and engaging while staying informative
-- Remember: ALL duties rotate - no permanent assignments
+For specific person questions: "[Name] is responsible for [specific chore] this week."
 
-Use the context below to answer accurately:
+For daily questions: "Today is [Day], so [Name] takes out the [trash type]."
 
-{context}
-"""
+STYLE RULES:
+- Be conversational and friendly
+- Never mention "Week 1/2/3/4" - just say "this week"
+- Use emojis to make responses visually appealing
+- Keep answers concise but complete
+- Always base answers on the provided context"""
 
-contextualize_q_prompt = ChatPromptTemplate.from_messages([
-    ("system", contextualize_q_system_prompt),
-    MessagesPlaceholder("chat_history"),
-    ("human", "{input}")
-])
+try:
+    contextualize_q_prompt = ChatPromptTemplate.from_messages([
+        ("system", contextualize_q_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}")
+    ])
 
-qa_prompt = ChatPromptTemplate.from_messages([
-    ("system", qa_system_prompt),
-    MessagesPlaceholder("chat_history"),
-    ("human", "{input}")
-])
+    qa_prompt = ChatPromptTemplate.from_messages([
+        ("system", qa_system_prompt + "\n\nContext:\n{context}"),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}")
+    ])
 
-history_aware_retriever = create_history_aware_retriever(
-    llm, vectorstore.as_retriever(search_kwargs={"k": 6}), contextualize_q_prompt
-)
-question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
+    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-# --- 8. Get Current Date Info ---
+except Exception as e:
+    st.error(f"Error setting up RAG chain: {e}")
+    st.stop()
+
+# --- 7. Date Context ---
 current_date, current_week, current_day, status = validate_and_get_week_info()
 
 
 def create_detailed_context(date, week_num, day):
-    context = f"""
+    return f"""
 CURRENT DATE AND WEEK CONTEXT:
 - Today's date: {date.strftime('%A, %B %d, %Y')}
-- Current week in 4-week rotation: Week {week_num} (internal reference)
+- Current week in 4-week rotation: Week {week_num}
 - Day of the week: {day}
 
-CONTEXT RULES FOR AI:
-- When user asks "today" or "who does X today", refer to {day} in Week {week_num}
-- When user asks "this week" or "whose turn", refer to Week {week_num}
-- DO NOT mention "Week {week_num}" in your response - just say "this week" or "today"
-- Use tabular format for multiple assignments
-- Answer all questions naturally and conversationally
-
-IMPORTANT ROTATION SYSTEM:
-- ALL chores rotate every week in a 4-week cycle
-- Black trash can duty rotates weekly (goes out Tuesday night, but person changes each week)
-- Kitchen trash days (Monday/Thursday/Sunday) rotate with weekly assignments
-- NO permanent assignments - everything rotates according to the 4-week schedule
+IMPORTANT: Use the exact week number (Week {week_num}) to look up assignments from the provided chore schedule tables.
 """
-    return context
 
 
-# --- 9. Initialize Chat History First ---
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-
-# Function to process sidebar button clicks
-def process_question(question):
-    st.session_state.chat_history.append({"role": "user", "content": question})
-    time_context = create_detailed_context(current_date, current_week, current_day)
-    contextual_prompt = f"{time_context}\n\nUSER QUESTION: {question}"
-    try:
-        result = rag_chain.invoke({
-            "input": contextual_prompt,
-            "chat_history": st.session_state.chat_history[:-1]
-        })
-        response = result["answer"]
-        st.session_state.chat_history.append({"role": "assistant", "content": response})
-    except Exception as e:
-        error_response = f"Sorry, I encountered an error: {str(e)}. Please try rephrasing your question."
-        st.session_state.chat_history.append({"role": "assistant", "content": error_response})
-
-
-# --- 10. Sidebar with Only 2 Quick Questions ---
+# --- 8. Sidebar ---
 with st.sidebar:
     st.markdown(f"""
     <div class="date-display">
@@ -272,24 +265,56 @@ with st.sidebar:
     st.markdown("### 💡 Quick Questions")
     sample_questions = [
         "List the duties for the current week",
-        "Who takes out the kitchen trash today?"
+        "Who takes out the kitchen trash today?",
+        "What does Tanmay need to do this week?"
     ]
-    for i, question in enumerate(sample_questions):
-        if st.button(question, key=f"sample_{i}", use_container_width=True):
-            process_question(question)
+
+    for i, q in enumerate(sample_questions):
+        if st.button(q, key=f"sample_{i}", use_container_width=True):
+            # Add the question to chat history
+            if "chat_history" not in st.session_state:
+                st.session_state.chat_history = []
+
+            # Add user message
+            st.session_state.chat_history.append({"role": "user", "content": q})
+
+            # Generate response immediately
+            time_context = create_detailed_context(current_date, current_week, current_day)
+            contextual_prompt = f"{time_context}\n\nUSER QUESTION: {q}"
+
+            try:
+                response = ""
+                for chunk in rag_chain.stream({
+                    "input": contextual_prompt,
+                    "chat_history": st.session_state.chat_history[:-1]
+                }):
+                    if "answer" in chunk:
+                        response += chunk["answer"]
+
+                # Add assistant response to chat history
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+            except Exception as e:
+                error_response = f"Sorry, I encountered an error: {str(e)}. Please try again."
+                st.session_state.chat_history.append({"role": "assistant", "content": error_response})
+
             st.rerun()
 
-    st.markdown("<br><br>", unsafe_allow_html=True)
     if st.button("🗑️ Clear Chat History", key="clear_chat", use_container_width=True):
         st.session_state.chat_history = []
         st.rerun()
 
-# --- 11. Main Chat Interface ---
+# --- 9. Main Chat ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# Display chat history
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask about chores... (e.g., 'List the duties for current week')"):
+# Handle new messages
+if prompt := st.chat_input("Ask about chores..."):
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -313,8 +338,10 @@ if prompt := st.chat_input("Ask about chores... (e.g., 'List the duties for curr
 
 
             full_response = st.write_stream(stream_generator())
+
         except Exception as e:
             full_response = f"Sorry, I encountered an error: {str(e)}. Please try rephrasing your question."
             st.error(full_response)
 
-    st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+    if 'full_response' in locals():
+        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
