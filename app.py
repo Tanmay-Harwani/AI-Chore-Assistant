@@ -75,13 +75,13 @@ def get_llm():
             api_key = st.secrets["GOOGLE_API_KEY"]
 
         if not api_key:
-            st.error("🔑 **API Key Missing!** Add `GOOGLE_API_KEY` to Streamlit secrets or environment variables.")
+            st.error(" **API Key Missing!** Add `GOOGLE_API_KEY` to Streamlit secrets or environment variables.")
             st.info("For local testing: `export GOOGLE_API_KEY='your-key'`")
             st.info("For Streamlit Cloud: Add secret in app settings")
             st.stop()
 
         return ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             temperature=0.2,
             google_api_key=api_key
         )
